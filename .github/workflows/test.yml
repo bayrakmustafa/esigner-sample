@@ -1,0 +1,26 @@
+name: 'esigner-sample'
+
+on: [push]
+
+jobs:
+  build:
+    name: Sign using Batch Sign
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Copy sample file
+      shell: bash
+      run: |
+        mkdir -p ${GITHUB_WORKSPACE}/example
+        cp "./sample/minimal.exe" "${GITHUB_WORKSPACE}/example/minimal.exe"
+    - name: Sign files in batch
+      uses: sslcom/esigner-codesign@v1.3.2
+      with:
+        command: batch_sign
+        username: esigner_demo
+        password: esignerDemo#1
+        totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
+        dir_path: ${GITHUB_WORKSPACE}/example
+        output_path: ${GITHUB_WORKSPACE}/artifacts
+        environment_name: TEST
+        jvm_max_memory: 4096M
