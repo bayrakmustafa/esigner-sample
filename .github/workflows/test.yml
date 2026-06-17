@@ -1,26 +1,241 @@
-name: 'esigner-sample'
+name: Desktop eSigner CKA smoke test (diagnostic only)
 
-on: [push]
+# Isolated, NON-PUBLISHING harness to debug the SSL.com eSigner CKA blocker
+# without running the full release pipeline (which builds + signs + publishes
+# to Spaces). This workflow ONLY exercises the Cloud Key Adapter setup:
+#   download <ver> -> install -> dump usage -> config -> unload/load ->
+#   list code-signing certs -> test-sign a throwaway EXE via signtool.
+# It never touches Spaces, never builds MSIX/MSI, never cuts a release.
+#
+# Background: eSignerCKATool v1.0.8 (build 20250228 — a pre-release) crashes in
+# `config` with a NullReferenceException / 0xC0000005 ~9s in (AFTER the network
+# auth round-trip), with sane secret lengths. v1.0.7 is the latest STABLE
+# release; this harness defaults to it. The TOTP flag spelling differs between
+# builds (the official SSL.com sample uses "-totp"; the 1.0.8 binary's own help
+# prints "-topt"), so we auto-detect it from the tool's usage output.
+#
+# Run via: Actions -> this workflow -> "Run workflow" (or the API). Iterate on
+# cka_version / totp_flag inputs — no code edits or tag burns between attempts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cka_version:
+        description: "eSignerCKA release to test (e.g. 1.0.7, 1.0.6, 1.0.4, 1.0.8)"
+        required: true
+        default: "1.0.7"
+        type: string
+      totp_flag:
+        # Which value goes under which flag. The two value flags are -topt and
+        # -pass, but their MEANING differs by build (1.0.7 help: -topt=Password,
+        # -pass=TOTP; 1.0.8 help: the reverse). "auto" reads the tool's own usage
+        # descriptions; "standard" = -topt:<TOTP> -pass:<pass> (what prior runs
+        # used, NPE'd); "swapped" = -topt:<pass> -pass:<TOTP> (1.0.7's own help).
+        description: "Arg mapping: auto | standard | swapped"
+        required: true
+        default: "auto"
+        type: string
+      mode:
+        description: "eSigner API mode: product | sandbox"
+        required: true
+        default: "product"
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    name: Sign using Batch Sign
-    runs-on: ubuntu-24.04
+  cka-smoke:
+    runs-on: windows-latest
+    env:
+      ES_USERNAME: ${{ secrets.ES_USERNAME }}
+      ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+      ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+      CKA_VERSION: ${{ inputs.cka_version }}
+      TOTP_FLAG: ${{ inputs.totp_flag }}
+      CKA_MODE: ${{ inputs.mode }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Copy sample file
-      shell: bash
-      run: |
-        mkdir -p ${GITHUB_WORKSPACE}/example
-        cp "./sample/minimal.exe" "${GITHUB_WORKSPACE}/example/minimal.exe"
-    - name: Sign files in batch
-      uses: sslcom/esigner-codesign@v1.3.2
-      with:
-        command: batch_sign
-        username: esigner_demo
-        password: esignerDemo#1
-        totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
-        dir_path: ${GITHUB_WORKSPACE}/example
-        output_path: ${GITHUB_WORKSPACE}/artifacts
-        environment_name: TEST
-        jvm_max_memory: 4096M
+      - name: eSigner CKA setup + test-sign
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:ES_USERNAME -or -not $env:ES_PASSWORD -or -not $env:ES_TOTP_SECRET) {
+              throw "Missing eSigner secrets ES_USERNAME / ES_PASSWORD / ES_TOTP_SECRET"
+          }
+          Write-Host "=== Testing eSignerCKA v$env:CKA_VERSION (mode=$env:CKA_MODE, flag=$env:TOTP_FLAG) ==="
+
+          # --- obtain the CKA installer (GitHub release zip, OR a direct URL) ---
+          # If CKA_VERSION is an http(s) URL, download it directly — used to test the
+          # EXACT build SSL.com distributes from ssl.com/downloads (app.esigner.com).
+          # Otherwise treat CKA_VERSION as a version number and build the GitHub URL.
+          $dl = "$env:RUNNER_TEMP\cka_download.bin"
+          if ($env:CKA_VERSION -like 'http*') {
+              Write-Host "Downloading (direct URL) $env:CKA_VERSION"
+              Invoke-WebRequest -Uri $env:CKA_VERSION -OutFile $dl -UseBasicParsing
+          } else {
+              $url = "https://github.com/SSLcom/eSignerCKA/releases/download/v$env:CKA_VERSION/SSL.COM-eSigner-CKA_$env:CKA_VERSION.zip"
+              Write-Host "Downloading (GitHub release) $url"
+              Invoke-WebRequest -Uri $url -OutFile $dl -UseBasicParsing
+          }
+          # Detect ZIP ('PK') vs a direct installer EXE ('MZ'); anything else = bad URL.
+          $hdr = [System.IO.File]::ReadAllBytes($dl)[0..1]
+          Write-Host "DIAG: downloaded $((Get-Item $dl).Length) bytes, header=$($hdr[0]),$($hdr[1])"
+          if ($hdr[0] -eq 0x50 -and $hdr[1] -eq 0x4B) {
+              $ckaDir = "$env:RUNNER_TEMP\eSignerCKA"
+              Expand-Archive -Force $dl $ckaDir
+              Write-Host "CKA archive contents:"; Get-ChildItem -Path $ckaDir -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
+              $exes = Get-ChildItem -Path $ckaDir -Recurse -Filter "*.exe"
+              $installer = $exes | Where-Object { $_.Name -match 'Setup|Installer|CKA' } | Select-Object -First 1
+              if (-not $installer) { $installer = $exes | Select-Object -First 1 }
+          } elseif ($hdr[0] -eq 0x4D -and $hdr[1] -eq 0x5A) {
+              $installerExe = "$env:RUNNER_TEMP\eSignerCKA_installer.exe"
+              Copy-Item $dl $installerExe -Force
+              $installer = Get-Item $installerExe
+          } else {
+              throw "Downloaded file is neither ZIP nor EXE (header $($hdr[0]),$($hdr[1])) — the URL likely needs auth or returned HTML."
+          }
+          if (-not $installer) { throw "eSigner CKA installer .exe not found" }
+          Write-Host "CKA installer: $($installer.FullName)"
+          $installDir = "$env:RUNNER_TEMP\eSignerCKA_bin"
+          Start-Process $installer.FullName -ArgumentList '/CURRENTUSER','/VERYSILENT','/SUPPRESSMSGBOXES',"/DIR=$installDir" -Wait
+          $cka = (Get-ChildItem -Path $installDir -Recurse -Filter "eSignerCKATool.exe" | Select-Object -First 1)
+          if (-not $cka) { throw "eSignerCKATool.exe not found after install" }
+          $ckaExe = $cka.FullName
+          Write-Host "eSignerCKATool: $ckaExe"
+
+          # --- dump the tool's own usage; decide the -topt/-pass mapping ----
+          # CRUX: both builds expose value flags -topt and -pass, but the help
+          # SWAPS their meaning: 1.0.7 says -topt=Password / -pass=TOTP, while
+          # 1.0.8 says -topt=TOTP / -pass=Password. Prior runs always sent
+          # -topt=<TOTP> -pass=<password> ("standard") and got the post-auth NPE,
+          # so the never-tried alternative is "swapped".
+          $usage = ''
+          try { $usage = ('' | & $ckaExe config 2>&1 | Out-String) } catch { $usage = "$_" }
+          Write-Host "DIAG: 'config' usage ↓`n$usage"
+          Write-Host "DIAG: secret lengths — user=$($env:ES_USERNAME.Length) pass=$($env:ES_PASSWORD.Length) totp=$($env:ES_TOTP_SECRET.Length)"
+
+          $mapping = $env:TOTP_FLAG
+          if ($mapping -eq 'auto') {
+              # Read each value flag's description; whichever says "TOTP" carries it.
+              $toptDesc = ''; $passDesc = ''
+              foreach ($l in ($usage -split "`n")) {
+                  if ($l -match '^\s*-topt\b\s+\S+\s+(.*)$') { $toptDesc = $matches[1].Trim() }
+                  if ($l -match '^\s*-pass\b\s+\S+\s+(.*)$') { $passDesc = $matches[1].Trim() }
+              }
+              if     ($toptDesc -match 'TOTP') { $mapping = 'standard' }
+              elseif ($passDesc -match 'TOTP') { $mapping = 'swapped' }
+              else   { $mapping = 'standard' }
+              Write-Host "DIAG: auto-mapping -> '$mapping' (topt desc='$toptDesc' | pass desc='$passDesc')"
+          }
+          switch ($mapping) {
+              'standard' { $toptVal = $env:ES_TOTP_SECRET; $passVal = $env:ES_PASSWORD }
+              'swapped'  { $toptVal = $env:ES_PASSWORD;    $passVal = $env:ES_TOTP_SECRET }
+              default    { throw "unknown mapping '$mapping' (use auto|standard|swapped)" }
+          }
+          $toptIs = if ($mapping -eq 'standard') { 'TOTP' } else { 'PASSWORD' }
+          $passIs = if ($mapping -eq 'standard') { 'PASSWORD' } else { 'TOTP' }
+          Write-Host "DIAG: mapping='$mapping' -> -topt carries $toptIs, -pass carries $passIs"
+
+          # --- config (capture EVERYTHING; a native crash still emits to stderr) ---
+          $key = "$env:RUNNER_TEMP\cka_master.key"
+          Write-Host "=== running: eSignerCKATool config -mode $env:CKA_MODE -user *** -topt *** -pass *** -key $key -r ==="
+          $cfgOut = (& $ckaExe config -mode $env:CKA_MODE -user "$env:ES_USERNAME" -topt "$toptVal" -pass "$passVal" -key $key -r 2>&1 | Out-String)
+          $cfgExit = $LASTEXITCODE
+          Write-Host "config output ↓`n$cfgOut"
+          Write-Host "config exit code: $cfgExit"
+          if ($cfgExit -ne 0) {
+              throw "eSigner CKA config FAILED on v$env:CKA_VERSION with flag '$flag' (exit=$cfgExit). See output above."
+          }
+
+          # --- unload/load the cert into the CurrentUser store --------------
+          & $ckaExe unload 2>&1 | Write-Host
+          (& $ckaExe load 2>&1 | Out-String) | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "eSigner CKA load FAILED (exit=$LASTEXITCODE)" }
+
+          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Sort-Object NotAfter -Descending | Select-Object -First 1
+          if (-not $cert) { throw "no code-signing cert in CurrentUser\My after load" }
+          Write-Host "DIAG: all CurrentUser\My code-signing certs:"
+          Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | ForEach-Object { Write-Host "  thumb=$($_.Thumbprint) key=$($_.HasPrivateKey) subj=$($_.Subject)" }
+          $thumb = $cert.Thumbprint
+          Write-Host "loaded cert: thumb=$thumb HasPrivateKey=$($cert.HasPrivateKey) subj=$($cert.Subject)"
+
+          # --- discover signtool, test-sign a throwaway PE ------------------
+          $kitsRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
+          $candidate = Get-ChildItem -Path $kitsRoot -Directory -ErrorAction SilentlyContinue `
+              | Where-Object { Test-Path (Join-Path $_.FullName 'x64\signtool.exe') } `
+              | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $candidate) { throw "signtool.exe not found under $kitsRoot\*\x64\" }
+          $signtool = Join-Path $candidate.FullName 'x64\signtool.exe'
+          Write-Host "signtool: $signtool"
+
+          # Sign a disposable copy of the CKA tool itself (a PE we own).
+          $testExe = "$env:RUNNER_TEMP\cka_smoketest_target.exe"
+          Copy-Item $ckaExe $testExe -Force
+          & "$signtool" sign /debug /fd SHA256 /sha1 "$thumb" /tr "http://ts.ssl.com" /td SHA256 $testExe
+          if ($LASTEXITCODE -ne 0) { throw "test signtool sign FAILED (exit=$LASTEXITCODE)" }
+          $sig = Get-AuthenticodeSignature $testExe
+          Write-Host "test-sign status=$($sig.Status) signer=$($sig.SignerCertificate.Thumbprint)"
+          if ($sig.Status -ne 'Valid' -and $sig.Status -ne 'UnknownError') {
+              throw "test-sign verification FAILED: status=$($sig.Status) msg=$($sig.StatusMessage)"
+          }
+
+          Write-Host "============================================================"
+          Write-Host " SMOKE TEST PASSED — CKA v$env:CKA_VERSION, mapping '$mapping'"
+          Write-Host " signed with thumbprint $thumb"
+          Write-Host "============================================================"
+
+      # Collect the eSignerCKA logs SSL.com support (Tier 2) asked for. Runs even
+      # when the CKA step fails (if: always()) and never fails the job itself.
+      - name: Collect eSignerCKA logs (for SSL.com support)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dest = "$env:RUNNER_TEMP\esignercka-logs"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          foreach ($src in @("$env:APPDATA\eSignerCKA", "$env:APPDATA\eSignerCKA\KSP", "$env:LOCALAPPDATA\eSignerCKA")) {
+              Write-Host "==================== $src ===================="
+              if (Test-Path $src) {
+                  Get-ChildItem -Recurse -Force $src -ErrorAction SilentlyContinue |
+                      ForEach-Object { Write-Host "  $($_.FullName)  ($($_.Length) bytes)" }
+                  Copy-Item -Recurse -Force $src (Join-Path $dest ($src -replace '[:\\]','_')) -ErrorAction SilentlyContinue
+                  Get-ChildItem -Recurse -File $src -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Length -lt 65536 } | ForEach-Object {
+                          Write-Host "----- BEGIN $($_.FullName) -----"
+                          Get-Content -Raw -ErrorAction SilentlyContinue $_.FullName | Write-Host
+                          Write-Host "----- END $($_.FullName) -----"
+                      }
+              } else { Write-Host "  (folder not present)" }
+          }
+      - name: Upload eSignerCKA logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esignercka-logs
+          path: ${{ runner.temp }}/esignercka-logs
+          if-no-files-found: warn
+
+  # Decisive disambiguation: run the SAME Desktop secrets through CodeSignTool
+  # (the exact path proven working in the Messenger release). This tells us
+  # whether ES_USERNAME/ES_PASSWORD/ES_TOTP_SECRET are valid independent of the
+  # CKA tool: if THIS job passes but cka-smoke fails on invalid_grant, the creds
+  # are fine and the problem is CKA-specific (escalate). If THIS job also fails
+  # auth, the Desktop secrets themselves are wrong (vs the Messenger repo).
+  codesign-auth:
+    name: CodeSignTool auth check (same secrets, proven path)
+    runs-on: windows-latest
+    steps:
+      - name: Prepare a throwaway PE to sign
+        shell: pwsh
+        run: Copy-Item "$env:WINDIR\System32\timeout.exe" "${{ github.workspace }}\cs_target.exe" -Force
+      - name: Sign via SSL.com CodeSignTool (authenticates with the Desktop secrets)
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/cs_target.exe
+          override: true
+          malware_block: false
