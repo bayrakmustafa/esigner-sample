@@ -162,10 +162,10 @@ jobs:
           # --- discover signtool, test-sign a throwaway PE ------------------
           $kitsRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
           $candidate = Get-ChildItem -Path $kitsRoot -Directory -ErrorAction SilentlyContinue `
-              | Where-Object { Test-Path (Join-Path $_.FullName 'x64\signtool.exe') } `
+              | Where-Object { Test-Path (Join-Path $_.FullName 'x86\signtool.exe') } `
               | Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $candidate) { throw "signtool.exe not found under $kitsRoot\*\x64\" }
-          $signtool = Join-Path $candidate.FullName 'x64\signtool.exe'
+          if (-not $candidate) { throw "signtool.exe not found under $kitsRoot\*\x86\" }
+          $signtool = Join-Path $candidate.FullName 'x86\signtool.exe'
           Write-Host "signtool: $signtool"
 
           # Sign a disposable copy of the CKA tool itself (a PE we own).
