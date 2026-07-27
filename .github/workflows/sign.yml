@@ -40,6 +40,7 @@ jobs:
           Remove-Item CodeSignTool.zip
           $batDir = Get-ChildItem -Path CodeSignTool_extracted -Filter "CodeSignTool.bat" -Recurse | Select-Object -First 1 | Select-Object -ExpandProperty DirectoryName
           if (-not $batDir) { Write-Host "CodeSignTool.bat 没找到，跳过这个诊断"; exit 0 }
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\code_sign_tool.properties" -Destination "$batDir\conf\code_sign_tool.properties" -Force
           Push-Location $batDir
           Write-Host "===== CodeSignTool get_credential_ids 测试(只测认证，不签名) ====="
           & ".\CodeSignTool.bat" get_credential_ids "-username=$env:ESIGNER_USERNAME" "-password=$env:ESIGNER_PASSWORD"
@@ -56,7 +57,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $tool = "$env:USERPROFILE\eSignerCKA\eSignerCKATool.exe"
-          & $tool config -mode product -user "$env:ESIGNER_USERNAME" -pass "$env:ESIGNER_PASSWORD" -totp "$env:ESIGNER_TOTP_SECRET" -key "$env:USERPROFILE\eSignerCKA\master.key" -r
+          & $tool config -mode sandbox -user "$env:ESIGNER_USERNAME" -pass "$env:ESIGNER_PASSWORD" -totp "$env:ESIGNER_TOTP_SECRET" -key "$env:USERPROFILE\eSignerCKA\master.key" -r
           if ($LASTEXITCODE -ne 0) { throw "eSignerCKATool config 失败(exit $LASTEXITCODE)，多半是账号/密码/TOTP或服务端认证问题，见上方输出" }
           & $tool unload
           & $tool load
@@ -66,14 +67,16 @@ jobs:
         continue-on-error: true
         run: |
           $ErrorActionPreference = "Stop"
+          $target = Join-Path $env:GITHUB_WORKSPACE "sample\minimal.exe"
+          if (-not (Test-Path -LiteralPath $target)) { throw "待签名文件没找到: $target" }
           $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object { $_.Subject -match "Esigner" -or $_.Issuer -match "SSL.com" } | Select-Object -First 1
           if (-not $cert) { $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1 }
           if (-not $cert) { throw "eSignerCKA 未在 Windows 证书存储里找到 Code Signing 证书，签名前置步骤失败" }
           $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x86\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 }
           if (-not $signtool) { throw "本机未找到 signtool.exe(x86)" }
-          & $signtool.FullName sign /debug /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $cert.Thumbprint build/windows/x64/runner/Release/winner_app.exe
-          & $signtool.FullName verify /pa build/windows/x64/runner/Release/winner_app.exe
+          & $signtool.FullName sign /debug /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $cert.Thumbprint $target
+          & $signtool.FullName verify /pa $target
 
       - name: Zip release build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath winner_app-windows.zip
