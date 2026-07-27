@@ -42,9 +42,27 @@ jobs:
           if (-not $batDir) { Write-Host "CodeSignTool.bat 没找到，跳过这个诊断"; exit 0 }
           Copy-Item -Path "$env:GITHUB_WORKSPACE\code_sign_tool.properties" -Destination "$batDir\conf\code_sign_tool.properties" -Force
           Push-Location $batDir
-          Write-Host "===== CodeSignTool get_credential_ids 测试(只测认证，不签名) ====="
-          & ".\CodeSignTool.bat" get_credential_ids "-username=$env:ESIGNER_USERNAME" "-password=$env:ESIGNER_PASSWORD"
-          Write-Host "===== exit code: $LASTEXITCODE ====="
+          Write-Host "===== CodeSignTool get_credential_ids 测试(只测认证，不签名) x100 ====="
+          $ok = 0
+          $fail = 0
+          $firstFailureAttempt = 0
+          $firstFailureOutput = ""
+          for ($i = 1; $i -le 100; $i++) {
+            $out = & ".\CodeSignTool.bat" get_credential_ids "-username=$env:ESIGNER_USERNAME" "-password=$env:ESIGNER_PASSWORD" 2>&1 | Out-String
+            $exit = $LASTEXITCODE
+            if ($exit -eq 0 -and $out -notmatch "invalid_grant") {
+              $ok++
+            } else {
+              $fail++
+              if ($firstFailureAttempt -eq 0) { $firstFailureAttempt = $i; $firstFailureOutput = $out }
+            }
+            Write-Host "attempt $i : exit=$exit ok=$ok fail=$fail"
+          }
+          Write-Host "===== 100 次汇总: 成功 $ok / 失败 $fail ====="
+          if ($firstFailureAttempt -gt 0) {
+            Write-Host "===== 第 $firstFailureAttempt 次(首次失败)的完整输出 ====="
+            Write-Host $firstFailureOutput
+          }
           Pop-Location
 
       - name: Configure eSignerCKA account and load certificate
@@ -69,9 +87,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           $target = Join-Path $env:GITHUB_WORKSPACE "sample\minimal.exe"
           if (-not (Test-Path -LiteralPath $target)) { throw "待签名文件没找到: $target" }
-          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object { $_.Subject -match "Esigner" -or $_.Issuer -match "SSL.com" } | Select-Object -First 1
-          if (-not $cert) { $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1 }
-          if (-not $cert) { throw "eSignerCKA 未在 Windows 证书存储里找到 Code Signing 证书，签名前置步骤失败" }
+          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object { $_.Subject -match "Esigner LLC" } | Select-Object -First 1
+          if (-not $cert) { throw "证书存储里没找到 Subject 含 'Esigner LLC' 的 Code Signing 证书，现有的是: $((Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert).Subject -join ' | ')" }
+          Write-Host "选中的证书: $($cert.Subject) (thumbprint $($cert.Thumbprint), 有效期至 $($cert.NotAfter.ToString('o')))"
           $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x86\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 }
           if (-not $signtool) { throw "本机未找到 signtool.exe(x86)" }
@@ -79,7 +97,9 @@ jobs:
           & $signtool.FullName verify /pa $target
 
       - name: Zip release build
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath winner_app-windows.zip
+        run: |
+          $target = Join-Path $env:GITHUB_WORKSPACE "sample\minimal.exe"
+          Compress-Archive -Path $target -DestinationPath winner_app-windows.zip -Force
 
       - uses: actions/upload-artifact@v4
         with:
