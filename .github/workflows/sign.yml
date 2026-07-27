@@ -6,6 +6,10 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      ESIGNER_USERNAME: ${{ secrets.ES_USERNAME }}
+      ESIGNER_PASSWORD: ${{ secrets.ES_PASSWORD }}
+      ESIGNER_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -17,66 +21,89 @@ jobs:
           Expand-Archive -Path eSignerCKA.zip -DestinationPath eSignerCKA_extracted -Force
           Remove-Item eSignerCKA.zip
           $installer = Get-ChildItem -Path eSignerCKA_extracted -Filter "*.exe" -Recurse | Select-Object -First 1
-          if (-not $installer) { throw "eSignerCKA 安装包里没找到 .exe 安装程序" }
+          if (-not $installer) { throw "No .exe installer found inside the eSignerCKA package" }
           New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\eSignerCKA" | Out-Null
           & $installer.FullName /CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /DIR="$env:USERPROFILE\eSignerCKA" | Out-Null
 
-      - name: Force time sync before eSigner auth (TOTP 依赖准确时间)
+      - name: Force time sync before eSigner auth (TOTP depends on accurate time)
         shell: pwsh
         run: |
           Write-Host "Before resync (UTC): $((Get-Date).ToUniversalTime().ToString('o'))"
           w32tm /resync /force
           Write-Host "After resync (UTC): $((Get-Date).ToUniversalTime().ToString('o'))"
 
-      - name: Diagnostic - test SSL.com auth via CodeSignTool (different client)
+      - name: Setup CodeSignTool for the auth diagnostic
         shell: pwsh
         continue-on-error: true
-        env:
-          ESIGNER_USERNAME: ${{ secrets.ES_USERNAME }}
-          ESIGNER_PASSWORD: ${{ secrets.ES_PASSWORD }}
         run: |
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip" -OutFile CodeSignTool.zip
           Expand-Archive -Path CodeSignTool.zip -DestinationPath CodeSignTool_extracted -Force
           Remove-Item CodeSignTool.zip
           $batDir = Get-ChildItem -Path CodeSignTool_extracted -Filter "CodeSignTool.bat" -Recurse | Select-Object -First 1 | Select-Object -ExpandProperty DirectoryName
-          if (-not $batDir) { Write-Host "CodeSignTool.bat 没找到，跳过这个诊断"; exit 0 }
+          if (-not $batDir) { throw "CodeSignTool.bat not found in the extracted archive" }
           Copy-Item -Path "$env:GITHUB_WORKSPACE\code_sign_tool.properties" -Destination "$batDir\conf\code_sign_tool.properties" -Force
-          Push-Location $batDir
-          Write-Host "===== CodeSignTool get_credential_ids 测试(只测认证，不签名) x100 ====="
-          $ok = 0
-          $fail = 0
-          $firstFailureAttempt = 0
-          $firstFailureOutput = ""
-          for ($i = 1; $i -le 100; $i++) {
-            $out = & ".\CodeSignTool.bat" get_credential_ids "-username=$env:ESIGNER_USERNAME" "-password=$env:ESIGNER_PASSWORD" 2>&1 | Out-String
-            $exit = $LASTEXITCODE
-            if ($exit -eq 0 -and $out -notmatch "invalid_grant") {
-              $ok++
-            } else {
-              $fail++
-              if ($firstFailureAttempt -eq 0) { $firstFailureAttempt = $i; $firstFailureOutput = $out }
-            }
-            Write-Host "attempt $i : exit=$exit ok=$ok fail=$fail"
-          }
-          Write-Host "===== 100 次汇总: 成功 $ok / 失败 $fail ====="
-          if ($firstFailureAttempt -gt 0) {
-            Write-Host "===== 第 $firstFailureAttempt 次(首次失败)的完整输出 ====="
-            Write-Host $firstFailureOutput
-          }
-          Pop-Location
+          Write-Host "Runner public egress IP: $((Invoke-RestMethod -Uri 'https://api.ipify.org?format=json').ip)"
+          "CODESIGNTOOL_DIR=$batDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Auth test batch 1/10 (attempts 1-10)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 0 -Count 10'
+
+      - name: Auth test batch 2/10 (attempts 11-20)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 10 -Count 10'
+
+      - name: Auth test batch 3/10 (attempts 21-30)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 20 -Count 10'
+
+      - name: Auth test batch 4/10 (attempts 31-40)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 30 -Count 10'
+
+      - name: Auth test batch 5/10 (attempts 41-50)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 40 -Count 10'
+
+      - name: Auth test batch 6/10 (attempts 51-60)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 50 -Count 10'
+
+      - name: Auth test batch 7/10 (attempts 61-70)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 60 -Count 10'
+
+      - name: Auth test batch 8/10 (attempts 71-80)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 70 -Count 10'
+
+      - name: Auth test batch 9/10 (attempts 81-90)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 80 -Count 10'
+
+      - name: Auth test batch 10/10 (attempts 91-100)
+        shell: pwsh
+        continue-on-error: true
+        run: '& "$env:GITHUB_WORKSPACE/.github/scripts/auth-attempt-batch.ps1" -Offset 90 -Count 10'
 
       - name: Configure eSignerCKA account and load certificate
         shell: pwsh
         continue-on-error: true
-        env:
-          ESIGNER_USERNAME: ${{ secrets.ES_USERNAME }}
-          ESIGNER_PASSWORD: ${{ secrets.ES_PASSWORD }}
-          ESIGNER_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
         run: |
           $ErrorActionPreference = "Stop"
           $tool = "$env:USERPROFILE\eSignerCKA\eSignerCKATool.exe"
           & $tool config -mode sandbox -user "$env:ESIGNER_USERNAME" -pass "$env:ESIGNER_PASSWORD" -totp "$env:ESIGNER_TOTP_SECRET" -key "$env:USERPROFILE\eSignerCKA\master.key" -r
-          if ($LASTEXITCODE -ne 0) { throw "eSignerCKATool config 失败(exit $LASTEXITCODE)，多半是账号/密码/TOTP或服务端认证问题，见上方输出" }
+          if ($LASTEXITCODE -ne 0) { throw "eSignerCKATool config failed (exit $LASTEXITCODE); most likely an account/password/TOTP or server-side authentication problem, see the output above" }
           & $tool unload
           & $tool load
 
@@ -86,13 +113,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $target = Join-Path $env:GITHUB_WORKSPACE "sample\minimal.exe"
-          if (-not (Test-Path -LiteralPath $target)) { throw "待签名文件没找到: $target" }
+          if (-not (Test-Path -LiteralPath $target)) { throw "File to sign not found: $target" }
           $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object { $_.Subject -match "Esigner LLC" } | Select-Object -First 1
-          if (-not $cert) { throw "证书存储里没找到 Subject 含 'Esigner LLC' 的 Code Signing 证书，现有的是: $((Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert).Subject -join ' | ')" }
-          Write-Host "选中的证书: $($cert.Subject) (thumbprint $($cert.Thumbprint), 有效期至 $($cert.NotAfter.ToString('o')))"
+          if (-not $cert) { throw "No Code Signing certificate with Subject containing 'Esigner LLC' found in the certificate store; available: $((Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert).Subject -join ' | ')" }
+          Write-Host "Selected certificate: $($cert.Subject) (thumbprint $($cert.Thumbprint), valid until $($cert.NotAfter.ToString('o')))"
           $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x86\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 }
-          if (-not $signtool) { throw "本机未找到 signtool.exe(x86)" }
+          if (-not $signtool) { throw "signtool.exe not found on this machine" }
           & $signtool.FullName sign /debug /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $cert.Thumbprint $target
           & $signtool.FullName verify /pa $target
 
